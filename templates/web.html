@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <title>Музыка по геолокации</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #282c34;
+            color: rgb(178, 126, 126);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            color: #985781;
+            margin-bottom: 20px;
+            z-index: 2;
+        }
+        audio {
+            margin-top: 20px;
+            border: 1px solid #2c3e5000;
+            border-radius: 5px;
+            padding: 10px;
+            background-color: #2c3e50;
+            color: white;
+            position: relative; /* Добавлено для управления z-index */
+            z-index: 2; /* Плеер выше canvas */
+        }
+        #map {
+            height: 500px; /* Высота карты */
+            width: 100%; /* Ширина карты */
+            margin-top: 100px; /* Отступ сверху */
+            position: relative; /* Добавлено для управления z-index */
+            z-index: 2; /* Карта выше canvas */
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 250px; /* Ограничение высоты canvas */
+            background-color: rgba(40, 44, 52, 0.9);
+            z-index: 1; /* Визуализатор ниже аудиоплеера и карты */
+        }
+        .leaflet-control-attribution {
+            display: none; /* Скрыть значок Leaflet */
+        }
+    </style>
+</head>
+<body>
+    <h1>Музыка по геолокации</h1>
+    <audio id="audioPlayer" controls>
+        <source id="audioSource" src="" type="audio/mpeg">
+        Ваш браузер не поддерживает аудио.
+    </audio>
+    <canvas id="canvas"></canvas> <!-- Элемент для визуализатора -->
+    <div id="map"></div> <!-- Элемент карты -->
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        
+        const map = L.map('map').setView([55.75, 37.6], 100); 
+    
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+        }).addTo(map);
+    
+        
+        const userIcon = L.icon({
+            iconUrl: 'static/geometka.png', 
+            iconSize: [30, 30], 
+            iconAnchor: [15, 30], 
+            popupAnchor: [0, -30] 
+        });
+    
+        
+        let userMarker = L.marker([55.75, 37.6], { icon: userIcon }).addTo(map).bindPopup("Вы здесь").openPopup();
+
+        
+        const audio = document.getElementById('audioPlayer');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const analyser = audioContext.createAnalyser();
+        const source = audioContext.createMediaElementSource(audio);
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+
+        analyser.fftSize = 1024; 
+        const bufferLength = 100;
+        const dataArray = new Uint8Array(bufferLength);
+
+        
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        function drawEqualizer(ctx, dataArray, canvasWidth, canvasHeight, initialX, xStep) {
+            const barWidth = (canvasWidth / dataArray.length) * 1;
+            const rectWidth = barWidth / 2;
+            let x = initialX;
+            for (const barHeight of dataArray) {
+                ctx.fillStyle = `rgb(${barHeight * 2 + 100}, ${barHeight}, ${- barHeight + 300})`; 
+                const rectHeight = barHeight / 2
+                let y = (canvasHeight / 2) - rectHeight;
+                
+                for(let i = 0; i < 2; i++) {
+                    ctx.fillRect(x, y, rectWidth, rectHeight);
+                    y += rectHeight;
+                }
+
+                x += xStep; 
+            }
+        }
+
+        function draw(analyser, ctx, dataArray, canvasWidth, canvasHeight) {
+            analyser.getByteFrequencyData(dataArray);
+            ctx.fillStyle = 'rgba(40, 44, 52, 0.9)';
+            ctx.fillRect(0, 0, canvasWidth, canvasHeight); 
+            const barWidth = (canvasWidth / dataArray.length) * 1;
+            
+            drawEqualizer(ctx, dataArray.reverse(), canvasWidth, canvasHeight, 0, barWidth / 2);
+            drawEqualizer(ctx, dataArray, canvasWidth, canvasHeight, canvasWidth, -barWidth / 2);
+
+            requestAnimationFrame(() => draw(analyser, ctx, dataArray, canvasWidth, canvasHeight));
+        }
+
+        function loadPointsOnMap() {
+            fetch('/coords')  // получить данные с сервера о точках
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Ошибка сети');
+                    }
+                    return response.json();
+                })
+                .then(points => {
+                    // Обработка полученных точек
+                    points.forEach(point => {
+                        const lat = point.latitude;
+                        const lon = point.longitude;
+                        const musicFile = point.music_file;
+
+                        L.marker([lat, lon]).addTo(map)
+                            .bindPopup(`Музыка: ${musicFile}`);
+                    });
+
+                    if (navigator.geolocation) {
+                        setInterval(() => {
+                            navigator.geolocation.getCurrentPosition(position => {
+                                const userLat = position.coords.latitude;
+                                const userLon = position.coords.longitude;
+
+                                // Обновление местоположения пользователя на карте
+                                userMarker.setLatLng([userLat, userLon]);
+
+                                // Отправка обновленного положения на сервер
+                                fetch('/location', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json'
+                                    },
+                                    body: JSON.stringify({ latitude: userLat, longitude: userLon })
+                                })
+                                .then(response => response.json())
+                                .then(data => {
+                                    if (data.music_file) {
+                                        playMusic(data.music_file);
+                                    } else {
+                                        console.log("Нет доступной музыки поблизости.");
+                                    }
+                                })
+                                .catch(error => {
+                                    console.error("Ошибка при получении музыки: ", error);
+                                });
+                            }, error => {
+                                console.error("Ошибка получения геолокации.", error.code, error.message); // Выводим код и сообщение об ошибке
+                            });
+                        }, 5000); // Запрос местоположения каждые 5 секунд
+                    } else {
+                        console.error("Геолокация не поддерживается вашим браузером.");
+                    }
+
+                })
+                .catch(error => {
+                    console.error("Ошибка загрузки точек: ", error);
+                });
+        }
+
+
+
+        
+        function playMusic(musicFile) {
+            const audioSource = document.getElementById('audioSource');
+            audioSource.src = '/music/' + musicFile; 
+            const audioPlayer = document.getElementById('audioPlayer');
+            audioPlayer.load();
+
+            try {
+                audioPlayer.play();
+                audioContext.resume().then(() => {
+                    requestAnimationFrame(() => draw(analyser, ctx, dataArray, canvas.width, canvas.height));
+                });
+            } catch (error) {
+                alert('ploho')  
+            }
+        }
+
+        
+        loadPointsOnMap();
+    </script>
+</body>
+</html>
+
